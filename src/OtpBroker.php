@@ -2,11 +2,10 @@
 
 namespace SadiqSalau\LaravelOtp;
 
+use Exception;
 use HiFolks\RandoPhp\Randomize;
 use SadiqSalau\LaravelOtp\Contracts\OtpBrokerInterface;
 use SadiqSalau\LaravelOtp\Contracts\OtpInterface as Otp;
-use SadiqSalau\LaravelOtp\OtpNotification;
-use SadiqSalau\LaravelOtp\OtpStore;
 
 class OtpBroker implements OtpBrokerInterface
 {
@@ -24,9 +23,37 @@ class OtpBroker implements OtpBrokerInterface
      */
     public function __construct(
         protected OtpStore $store
-    ) {
+    )
+    {
     }
 
+    /**
+     * Set custom Otp generator
+     *
+     * @param callable $callback
+     * @return static
+     */
+    public static function useGenerator($callback)
+    {
+        if (is_callable($callback)) {
+            static::$customGenerator = $callback;
+        }
+    }
+
+    /**
+     * Update current Otp
+     *
+     * @return array
+     */
+    public function update()
+    {
+        return ($data = $this->store->retrieve()) ?
+            $this->send(
+                $data['otp'],
+                $data['notifiable']
+            ) :
+            [ 'status' => static::OTP_EMPTY ];
+    }
 
     /**
      * Send Otp notification
@@ -53,22 +80,69 @@ class OtpBroker implements OtpBrokerInterface
         // Store otp
         $this->store->put($data);
 
-        return ['status' => static::OTP_SENT];
+        return [
+            'status'     => static::OTP_SENT,
+            'code'       => $data['code'],
+            'expires_at' => $data['expires'],
+        ];
     }
 
     /**
-     * Update current Otp
+     * Create Otp data
      *
+     * @param Otp $otp
+     * @param mixed $notifiable
      * @return array
      */
-    public function update()
+    protected function createOtpData(
+        $otp,
+        $notifiable
+    )
     {
-        return ($data = $this->store->retrieve()) ?
-            $this->send(
-                $data['otp'],
-                $data['notifiable']
-            ) :
-            ['status' => static::OTP_EMPTY];
+        return [
+            'otp'        => $otp,
+            'notifiable' => $notifiable,
+            'code'       => $this->generateOtpCode(
+                config('otp.format'),
+                config('otp.length')
+            ),
+            'expires'    => now()->addMinutes(config('otp.expires')),
+        ];
+    }
+
+    /**
+     * Generates Otp code
+     *
+     * @param string $format
+     * @param int $length
+     * @return string
+     */
+    public static function generateOtpCode(
+        $format,
+        $length
+    )
+    {
+        return static::$customGenerator ? call_user_func(
+            static::$customGenerator,
+            $format,
+            $length
+        ) : static::defaultGenerator($format, $length);
+    }
+
+    /**
+     * Otp default generator
+     *
+     * @param string $format
+     * @param int $length
+     * @return string
+     * @throws Exception
+     */
+    protected static function defaultGenerator($format, $length)
+    {
+        if (!in_array($format, [ 'numeric', 'alpha', 'alphanumeric' ], true)) {
+            throw new Exception('Unknown OTP code format!');
+        }
+        return Randomize::chars($length)->{$format}()->generate();
     }
 
     /**
@@ -81,11 +155,11 @@ class OtpBroker implements OtpBrokerInterface
     {
         // Otp exists?
         if (!$data = $this->store->retrieve())
-            return ['status' => static::OTP_EMPTY];
+            return [ 'status' => static::OTP_EMPTY ];
 
         // Is the code correct?
         else if ($data['code'] != $code)
-            return ['status' => static::OTP_MISMATCHED];
+            return [ 'status' => static::OTP_MISMATCHED ];
 
         return [
             'status' => static::OTP_MATCHED,
@@ -102,11 +176,11 @@ class OtpBroker implements OtpBrokerInterface
     {
         // Otp exists?
         if (!$data = $this->store->retrieve())
-            return ['status' => static::OTP_EMPTY];
+            return [ 'status' => static::OTP_EMPTY ];
 
         // Is the code correct?
         else if ($data['code'] != $code)
-            return ['status' => static::OTP_MISMATCHED];
+            return [ 'status' => static::OTP_MISMATCHED ];
 
         // Process the Otp
         else {
@@ -117,7 +191,7 @@ class OtpBroker implements OtpBrokerInterface
 
             return [
                 'status' => static::OTP_PROCESSED,
-                'result' => $result
+                'result' => $result,
             ];
         }
     }
@@ -135,31 +209,9 @@ class OtpBroker implements OtpBrokerInterface
     }
 
     /**
-     * Create Otp data
-     *
-     * @param Otp $otp
-     * @param mixed $notifiable
-     * @return array
-     */
-    protected function createOtpData(
-        $otp,
-        $notifiable
-    ) {
-        return [
-            'otp'           => $otp,
-            'notifiable'    => $notifiable,
-            'code'          => $this->generateOtpCode(
-                config('otp.format'),
-                config('otp.length')
-            ),
-            'expires'       => now()->addMinutes(config('otp.expires'))
-        ];
-    }
-
-    /**
      * Set store identifier
      *
-     * @param  string  $identifier
+     * @param string $identifier
      * @return static
      */
     public function identifier($identifier)
@@ -167,53 +219,5 @@ class OtpBroker implements OtpBrokerInterface
         $this->store->identifier($identifier);
 
         return $this;
-    }
-
-    /**
-     * Generates Otp code
-     *
-     * @param string $format
-     * @param int $length
-     * @return string
-     */
-    public static function generateOtpCode(
-        $format,
-        $length
-    ) {
-        return static::$customGenerator ? call_user_func(
-            static::$customGenerator,
-            $format,
-            $length
-        ) : static::defaultGenerator($format, $length);
-    }
-
-    /**
-     * Set custom Otp generator
-     *
-     * @param callable $callback
-     * @return static
-     */
-    public static function useGenerator($callback)
-    {
-        if (is_callable($callback)) {
-            static::$customGenerator = $callback;
-        }
-    }
-
-
-    /**
-     * Otp default generator
-     *
-     * @param string $format
-     * @param int $length
-     * @return string
-     * @throws \Exception
-     */
-    protected static function defaultGenerator($format, $length)
-    {
-        if (!in_array($format, ['numeric', 'alpha', 'alphanumeric'], true)) {
-            throw new \Exception('Unknown OTP code format!');
-        }
-        return Randomize::chars($length)->{$format}()->generate();
     }
 }
